@@ -227,7 +227,7 @@ class peerwork_detail_summary implements templatable, renderable {
                                 $feedbacktext = $feedbackrendered["$member->id-$critid-$peer->id"];
                             } else {
                                 $feedbacktext = print_collapsible_region(
-                                    $justifications[$member->id][$critid][$peer->id]->justification,
+                                    s($justifications[$member->id][$critid][$peer->id]->justification),
                                     'peerwork-feedback',
                                     'peerwork-feedback-' .
                                     $member->id .
@@ -236,7 +236,7 @@ class peerwork_detail_summary implements templatable, renderable {
                                     '-' .
                                     $peer->id,
                                     shorten_text(
-                                        $justifications[$member->id][$critid][$peer->id]->justification,
+                                        s($justifications[$member->id][$critid][$peer->id]->justification),
                                         20
                                     ),
                                     '',
@@ -310,7 +310,7 @@ class peerwork_detail_summary implements templatable, renderable {
                                 $feedbacktext = $feedbackrendered["$peer->id-$critid-$member->id"];
                             } else {
                                 $feedbacktext = print_collapsible_region(
-                                    $justifications[$peer->id][$critid][$member->id]->justification,
+                                    s($justifications[$peer->id][$critid][$member->id]->justification),
                                     'peerwork-feedback',
                                     'peerwork-feedback-' .
                                     $peer->id .
@@ -319,7 +319,7 @@ class peerwork_detail_summary implements templatable, renderable {
                                     '-' .
                                     $member->id,
                                     shorten_text(
-                                        $justifications[$peer->id][$critid][$member->id]->justification,
+                                        s($justifications[$peer->id][$critid][$member->id]->justification),
                                         20
                                     ),
                                     '',

@@ -157,6 +157,7 @@ class mod_peerwork_override_form extends moodleform {
                     get_string('comments', 'mod_peerwork'),
                     'wrap="virtual" rows="1" cols="50"'
                 );
+                $mform->setType('comments_' . $uniqueid, PARAM_TEXT);
                 $mform->setDefault('comments_' . $uniqueid, $comments);
                 $mform->addHelpButton('comments_' . $uniqueid, 'comments', 'peerwork');
 

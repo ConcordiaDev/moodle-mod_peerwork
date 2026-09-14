@@ -37,9 +37,14 @@ $groupid = required_param('groupid', PARAM_INT);
 $cm = get_coursemodule_from_id('peerwork', $id, 0, false, MUST_EXIST);
 $course = $DB->get_record('course', ['id' => $cm->course], '*', MUST_EXIST);
 $peerwork = $DB->get_record('peerwork', ['id' => $cm->instance], '*', MUST_EXIST);
+$group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
+
+if ($group->courseid != $cm->course) {
+    throw new moodle_exception('invalidcoursemodule', 'error');
+}
+
 $submission = $DB->get_record('peerwork_submission', ['peerworkid' => $peerwork->id, 'groupid' => $groupid]);
 $members = groups_get_members($groupid);
-$group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
 $status = peerwork_get_status($peerwork, $group);
 
 // Print the standard page header and check access rights.

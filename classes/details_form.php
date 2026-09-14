@@ -216,8 +216,8 @@ class mod_peerwork_details_form extends moodleform {
                 get_string('revisedgrade', 'mod_peerwork') . $OUTPUT->help_icon('revisedgrade', 'mod_peerwork'),
             ];
 
-            $totalcalculated = 0;
-            $totalfinalweighted = 0;
+            // $totalcalculated = 0;
+            // $totalfinalweighted = 0;
             foreach ($data['finalgrades'] as $member) {
                 $row = new html_table_row();
 
@@ -251,12 +251,12 @@ class mod_peerwork_details_form extends moodleform {
 
                 $row->cells[] = $revisedgradeel->toHtml();
 
-                $totalcalculated += $member['calcgrade'];
-                $totalfinalweighted += $member['finalweightedgrade'];
-
+                // $totalcalculated += $member['calcgrade'];
+                // $totalfinalweighted += $member['finalweightedgrade'];
                 $t->data[] = $row;
             }
 
+            /*
             // Add totals.
             $row = new html_table_row();
             $row->attributes['class'] = 'grading-summary-totals';
@@ -281,6 +281,7 @@ class mod_peerwork_details_form extends moodleform {
                 $revisedtotal,
             ];
             $t->data[] = $row;
+            */
 
             $data['finalgrades'] = html_writer::table($t);
 

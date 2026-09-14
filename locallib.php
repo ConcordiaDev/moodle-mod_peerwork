@@ -1083,6 +1083,10 @@ function peerwork_peer_override($peerworkid, $gradedby, $groupid, $overridden, $
     $context = context_module::instance($cm->id);
     $pac = new mod_peerwork_criteria($peerworkid);
     $criteria = $pac->get_criteria();
+    $group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
+    if ($group->courseid != $cm->course) {
+        throw new moodle_exception('invalidcoursemodule', 'error');
+    }
     $members = groups_get_members($groupid);
     $peerwork = $DB->get_record('peerwork', ['id' => $peerworkid], '*', MUST_EXIST);
 
