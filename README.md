@@ -55,6 +55,10 @@ Authors
 
 - Extended and improved by Amanda Doughty, City, University of London
 
+2026
+
+- Extended and improves by Francisco Berrizbeitia, Concordia University, Montreal
+
 Supported Versions
 ==================
 
