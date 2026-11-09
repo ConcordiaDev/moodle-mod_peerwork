@@ -26,9 +26,13 @@ Teachers can export grades for an individual group or the entire cohort as a csv
 Teachers can lock the activity, giving students only one attempt to submit. They can also unlock a group submission or an individual student.
 
 Calculator plugins
-Calculator plugins can be assigned available scales. The default is 'all'. If scales are selected then only those will be available in the criteria settings. The scale setting is
-locked once a student submits peer grades. Changing the calculator type will not affect the peer grades even if the new calculator does not have the scale used as an available
-scale. Available scale is only checked when the criteria scale is enabled.
+====
+The calculator is a subplugin of the Peer Work activity. Included calculators:
+
+- WebPA: Estimates the contribution a student makes to the group project based on the grade given by their peers and adjust the grade accordingly.
+- SimplePA: Calculates the grade as simple average of the peer grades.
+
+Calculators can be limited to certain scales. The default is "all". If scales are selected, only those are offered in the criteria settings. The scale setting is locked once a student submits peer grades. Changing the calculator doesn't change existing peer grades, even if the new calculator doesn't allow the scale that was used.
 
 
 Authors
@@ -57,12 +61,12 @@ Authors
 
 2026
 
-- Extended and improves by Francisco Berrizbeitia, Concordia University, Montreal
+- Separate-groups security fixes, teacher exclusion from peer assessment and the SimplePA calculator by Francisco Berrizbeitia, Concordia University.
 
 Supported Versions
 ==================
 
-- The module has been tested with Moodle versions 4.0
+- The module has been tested with Moodle versions 4.5
 
 Installation instructions
 =========================

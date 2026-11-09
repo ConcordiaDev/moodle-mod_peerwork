@@ -17,12 +17,19 @@
 /**
  * Release grades.
  *
+ * SECURITY:
+ *  - groupid > 0: the group is authorised for the current user before anything is released.
+ *  - groupid = 0: "release all" requires moodle/site:accessallgroups, and is still limited
+ *    to the groups the user can access within this Peer Work activity.
+ *
  * @package    mod_peerwork
  * @copyright  2019 Coventry University
  * @author     Frédéric Massart <fred@branchup.tech>
+ * @author     2026 Francisco Berrizbeitia <francisco.berrizbeitia@concordia.ca>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
+use core\output\notification;
 use mod_peerwork\event\grades_released;
 
 require_once(__DIR__ . '/../../config.php');
@@ -43,26 +50,53 @@ $PAGE->set_url('/mod/peerwork/release.php', ['id' => $cm->id, 'groupid' => $grou
 
 $peerwork = $DB->get_record('peerwork', ['id' => $cm->instance], '*', MUST_EXIST);
 
-if ($groupid > 0) {
-    $group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
-    if ($group->courseid != $cm->course) {
-        throw new moodle_exception('invalidcoursemodule', 'error');
-    }
+// SECURITY: Fail closed if the group-access helpers are missing from locallib.php.
+if (!function_exists('peerwork_can_access_group') || !function_exists('peerwork_get_accessible_groups')) {
+    throw new coding_exception('mod_peerwork group-access helpers are missing from locallib.php');
 }
 
+$viewurl = new moodle_url('/mod/peerwork/view.php', ['id' => $cm->id]);
+
 if ($groupid > 0) {
-    $sql = 'peerworkid = :peerworkid AND groupid = :groupid AND COALESCE(timegraded) > 0 AND released = 0';
-    $submissions = $DB->get_records_select('peerwork_submission', $sql, [
-        'peerworkid' => $peerwork->id,
-        'groupid' => $groupid,
-    ]);
+    // SECURITY: Authorise the single requested group before touching any submission.
+    // Covers: non-existent group, group from another course, group outside the
+    // Peer Work grouping, and (in Separate groups mode) groups the user is not a
+    // member of without moodle/site:accessallgroups.
+    // Unknown and forbidden IDs get the same response to prevent enumeration.
+    if (!peerwork_can_access_group($cm, $peerwork, $groupid)) {
+        redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
+    }
+    $groupids = [$groupid];
+
+} else if ($groupid === 0) {
+    // SECURITY: "Release all grades for all groups" affects every group, so it is
+    // restricted to users who can access all groups (matches the button in view.php).
+    if (!has_capability('moodle/site:accessallgroups', $context)) {
+        redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
+    }
+
+    // Defence in depth: still limit the release to the groups this user can access
+    // within this Peer Work activity (respects the Peer Work grouping).
+    $groupids = array_keys(peerwork_get_accessible_groups($cm, $peerwork));
+    if (empty($groupids)) {
+        redirect($viewurl, get_string('nogroups', 'mod_peerwork'), null, notification::NOTIFY_WARNING);
+    }
+
 } else {
-    $sql = 'peerworkid = :peerworkid AND COALESCE(timegraded) > 0 AND released = 0';
-    $submissions = $DB->get_records_select('peerwork_submission', $sql, ['peerworkid' => $peerwork->id]);
+    // Negative or otherwise invalid group IDs are rejected.
+    redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
 }
+
+// Only graded, unreleased submissions belonging to authorised groups are released.
+[$ingroupsql, $ingroupparams] = $DB->get_in_or_equal($groupids, SQL_PARAMS_NAMED, 'grp');
+$sql = "peerworkid = :peerworkid
+        AND groupid $ingroupsql
+        AND COALESCE(timegraded, 0) > 0
+        AND released = 0";
+$submissions = $DB->get_records_select('peerwork_submission', $sql,
+    ['peerworkid' => $peerwork->id] + $ingroupparams);
 
 foreach ($submissions as $submission) {
-
     // Release the submission.
     $submission->released = time();
     $submission->releasedby = $USER->id;
@@ -84,4 +118,4 @@ foreach ($submissions as $submission) {
 // Trigger the gradebook update.
 peerwork_update_grades($peerwork);
 
-redirect(new moodle_url('/mod/peerwork/view.php', ['id' => $cm->id]));
+redirect($viewurl);

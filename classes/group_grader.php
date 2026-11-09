@@ -110,7 +110,7 @@ class group_grader {
         }
 
         // Save the individual grades.
-        $members = groups_get_members($this->groupid);
+        $members = peerwork_get_group_members($this->peerwork, $this->groupid);
         $group = $DB->get_record('groups', ['id' => $this->groupid], '*', MUST_EXIST);
         peerwork_update_local_grades($this->peerwork, $group, $this->submission, array_keys($members), $this->revisedgrades);
 

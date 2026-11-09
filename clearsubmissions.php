@@ -17,11 +17,18 @@
 /**
  * Clear submissions.
  *
+ * SECURITY:
+ *  - groupid > 0: the group is authorised for the current user before anything is deleted.
+ *  - groupid = 0: "clear all" requires moodle/site:accessallgroups, and is still limited
+ *    to the groups the user can access within this Peer Work activity.
+ *
  * @package    mod_peerwork
  * @copyright  2020 Xi'an Jiaotong-Liverpool University
  * @author     Frédéric Massart <fred@branchup.tech>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
+
+use core\output\notification;
 
 require_once(__DIR__ . '/../../config.php');
 require_once(__DIR__ . '/locallib.php');
@@ -41,13 +48,47 @@ $PAGE->set_url('/mod/peerwork/clearsubmissions.php', ['id' => $cm->id, 'groupid'
 
 $peerwork = $DB->get_record('peerwork', ['id' => $cm->instance], '*', MUST_EXIST);
 
-if ($groupid > 0) {
-	$group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
-	if ($group->courseid != $cm->course) {
-		throw new moodle_exception('invalidcoursemodule', 'error');
-	}
+// SECURITY: Fail closed if the group-access helpers are missing from locallib.php.
+if (!function_exists('peerwork_can_access_group') || !function_exists('peerwork_get_accessible_groups')) {
+    throw new coding_exception('mod_peerwork group-access helpers are missing from locallib.php');
 }
 
-mod_peerwork_clear_submissions($peerwork, $context, $groupid);
+$viewurl = new moodle_url('/mod/peerwork/view.php', ['id' => $cm->id]);
 
-redirect(new moodle_url('/mod/peerwork/view.php', ['id' => $cm->id]));
+if ($groupid > 0) {
+    // SECURITY: Authorise the single requested group before deleting anything.
+    // Covers: non-existent group, group from another course, group outside the
+    // Peer Work grouping, and (in Separate groups mode) groups the user is not a
+    // member of without moodle/site:accessallgroups.
+    // Unknown and forbidden IDs get the same response to prevent enumeration.
+    if (!peerwork_can_access_group($cm, $peerwork, $groupid)) {
+        redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
+    }
+
+    mod_peerwork_clear_submissions($peerwork, $context, $groupid);
+
+} else if ($groupid === 0) {
+    // SECURITY: "Clear all submissions for all groups" deletes data for every group,
+    // so it is restricted to users who can access all groups.
+    if (!has_capability('moodle/site:accessallgroups', $context)) {
+        redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
+    }
+
+    // Defence in depth: never pass groupid = 0 to the delete function, because it
+    // would clear every submission in the activity. Instead, clear each accessible
+    // group explicitly (respects the Peer Work grouping).
+    $groupids = array_keys(peerwork_get_accessible_groups($cm, $peerwork));
+    if (empty($groupids)) {
+        redirect($viewurl, get_string('nogroups', 'mod_peerwork'), null, notification::NOTIFY_WARNING);
+    }
+
+    foreach ($groupids as $accessiblegroupid) {
+        mod_peerwork_clear_submissions($peerwork, $context, (int) $accessiblegroupid);
+    }
+
+} else {
+    // Negative or otherwise invalid group IDs are rejected.
+    redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
+}
+
+redirect($viewurl);

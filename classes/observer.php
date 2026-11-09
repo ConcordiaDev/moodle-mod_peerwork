@@ -76,7 +76,7 @@ class mod_peerwork_observer {
 
         $groupid = $event->objectid;
         $userid = $event->relateduserid;
-        $members = groups_get_members($groupid);
+        //$members = groups_get_members($groupid);
 
         $sql = "SELECT DISTINCT p.*
             FROM {peerwork} p

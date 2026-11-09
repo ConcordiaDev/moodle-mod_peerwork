@@ -26,8 +26,12 @@
  *
  * View provides a summary page the content of which depends if you are the teacher or a submitting student.
  *
+ * SECURITY: The teacher view only lists groups the current user may access
+ * (separate-groups enforcement via peerwork_get_accessible_groups()).
+ *
  * @package    mod_peerwork
  * @copyright  2013 LEARNING TECHNOLOGY SERVICES
+ * @author     2026 Francisco Berrizbeitia <francisco.berrizbeitia@concordia.ca>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
@@ -50,7 +54,6 @@ if ($id) {
     $cm = get_coursemodule_from_id('peerwork', $id, 0, false, MUST_EXIST);
     $course = $DB->get_record('course', ['id' => $cm->course], '*', MUST_EXIST);
     $peerwork = $DB->get_record('peerwork', ['id' => $cm->instance], '*', MUST_EXIST);
-
 } else if ($n) {
     $peerwork = $DB->get_record('peerwork', ['id' => $n], '*', MUST_EXIST);
     $course = $DB->get_record('course', ['id' => $peerwork->course], '*', MUST_EXIST);
@@ -60,6 +63,7 @@ if ($id) {
 }
 
 $groupingid = $peerwork->pwgroupingid;
+
 require_login($course, true, $cm);
 $context = context_module::instance($cm->id);
 $modinfo = get_fast_modinfo($course);
@@ -67,6 +71,11 @@ $cminfo = $modinfo->get_cm($cm->id);
 $info = new info_module($cminfo);
 
 require_capability('mod/peerwork:view', $context);
+
+// SECURITY: Fail closed if the group-access helpers have not been added to locallib.php.
+if (!function_exists('peerwork_get_accessible_groups') || !function_exists('peerwork_can_access_group')) {
+    throw new coding_exception('mod_peerwork group-access helpers are missing from locallib.php');
+}
 
 $params = [
     'objectid' => $cm->instance,
@@ -90,7 +99,11 @@ if (has_capability('mod/peerwork:grade', $context)) {
     // Output starts here.
     echo $OUTPUT->header();
 
-    $allgroups = groups_get_all_groups($course->id, 0, $groupingid);
+    // SECURITY: Only list groups the current user is allowed to access.
+    // In SEPARATEGROUPS mode this returns only the user's own groups, unless
+    // they hold moodle/site:accessallgroups in this module context.
+    $allgroups = peerwork_get_accessible_groups($cm, $peerwork);
+
     $anynongraded = false;
 
     $t = new html_table();
@@ -107,10 +120,17 @@ if (has_capability('mod/peerwork:grade', $context)) {
     $t->responsive = false;
 
     foreach ($allgroups as $group) {
-        $members = groups_get_members($group->id);
+
+        // SECURITY: Defence in depth - re-check access for every group before
+        // rendering any data, action links, or the in-place grade editor.
+        if (!peerwork_can_access_group($cm, $peerwork, (int) $group->id)) {
+            continue;
+        }
+
+        $members = peerwork_get_group_members($peerwork, (int) $group->id);
+
         // Filter groups based on any restrictions.
         $newmembers = $info->filter_user_list($members);
-
         if ($members && !$newmembers) {
             continue;
         }
@@ -119,6 +139,7 @@ if (has_capability('mod/peerwork:grade', $context)) {
         $status = peerwork_get_status($peerwork, $group, $submission);
         $grader = new mod_peerwork\group_grader($peerwork, $group->id, $submission);
         $wasgraded = $grader->was_graded();
+
         $detailsurl = new moodle_url('details.php', ['id' => $cm->id, 'groupid' => $group->id]);
         $anynongraded = $anynongraded || !$wasgraded;
 
@@ -131,7 +152,6 @@ if (has_capability('mod/peerwork:grade', $context)) {
             new moodle_url('export.php', ['id' => $cm->id, 'groupid' => $group->id, 'sesskey' => sesskey()]),
             get_string('export', 'mod_peerwork')
         ));
-
         if (!$wasgraded) {
             $menu->add_secondary_action(new action_link(
                 new moodle_url('clearsubmissions.php', ['id' => $cm->id, 'groupid' => $group->id, 'sesskey' => sesskey()]),
@@ -139,7 +159,6 @@ if (has_capability('mod/peerwork:grade', $context)) {
                 new confirm_action(get_string('confimrclearsubmission', 'mod_peerwork'))
             ));
         }
-
         if ($status->code == PEERWORK_STATUS_GRADED) {
             $menu->add_secondary_action(new action_link(
                 new moodle_url('release.php', ['id' => $cm->id, 'groupid' => $group->id, 'sesskey' => sesskey()]),
@@ -148,11 +167,12 @@ if (has_capability('mod/peerwork:grade', $context)) {
         }
 
         $duedate = peerwork_due_date($peerwork);
-
         if ($duedate !== PEERWORK_DUEDATE_PASSED) {
             $PAGE->requires->js_call_amd('mod_peerwork/inplace_editable');
         }
 
+        // NOTE: Hiding this editor is UI-only. The inplace_editable callback in lib.php
+        // must ALSO call peerwork_require_group_access() before saving.
         $gradeinplace = new core\output\inplace_editable(
             'mod_peerwork',
             'groupgrade_' . $peerwork->id,
@@ -177,32 +197,42 @@ if (has_capability('mod/peerwork:grade', $context)) {
         ];
         $t->data[] = $row;
     }
+
     echo html_writer::table($t);
 
+    // NOTE: These bulk actions send groupid = 0 ("all groups"). The target scripts
+    // (export.php, downloadallsubmissions.php, release.php, clearsubmissions.php)
+    // must restrict themselves to peerwork_get_accessible_groups() as well.
     echo $OUTPUT->box_start('generalbox', null);
-
-    echo $OUTPUT->single_button(new moodle_url('export.php', ['id' => $cm->id, 'groupid' => 0, 'sesskey' => sesskey()]),
+    
+    // SECURITY: "Release all grades for all groups" affects every group in the activity,
+    // so only show it to users who can access all groups in this module context.
+    if (has_capability('moodle/site:accessallgroups', $context)) {
+        echo $OUTPUT->single_button(new moodle_url('export.php', ['id' => $cm->id, 'groupid' => 0, 'sesskey' => sesskey()]),
         get_string("exportxls", 'mod_peerwork'), 'get');
-
-    echo $OUTPUT->single_button(new moodle_url('downloadallsubmissions.php', ['id' => $cm->id]),
+        
+        echo $OUTPUT->single_button(new moodle_url('downloadallsubmissions.php', ['id' => $cm->id]),
         get_string("downloadallsubmissions", 'mod_peerwork'), 'post');
-
-    echo $OUTPUT->single_button(new moodle_url('release.php', ['id' => $cm->id, 'groupid' => 0, 'sesskey' => sesskey()]),
+        
+        echo $OUTPUT->single_button(new moodle_url('release.php', ['id' => $cm->id, 'groupid' => 0, 'sesskey' => sesskey()]),
         get_string("releaseallgradesforallgroups", 'mod_peerwork'), 'get');
-
-    if ($anynongraded) {
-        $clearbutton = new single_button(
-            new moodle_url('clearsubmissions.php', ['id' => $cm->id, 'groupid' => 0, 'sesskey' => sesskey()]),
-            get_string('clearallsubmissionsforallgroups', 'mod_peerwork')
-        );
-        $clearbutton->add_confirm_action(get_string('confimrclearsubmissions', 'mod_peerwork'));
-        echo $OUTPUT->render($clearbutton);
     }
 
+    if ($anynongraded) {
+        if (has_capability('moodle/site:accessallgroups', $context)) {
+            $clearbutton = new single_button(
+                new moodle_url('clearsubmissions.php', ['id' => $cm->id, 'groupid' => 0, 'sesskey' => sesskey()]),
+                get_string('clearallsubmissionsforallgroups', 'mod_peerwork')
+            );
+            $clearbutton->add_confirm_action(get_string('confimrclearsubmissions', 'mod_peerwork'));
+            echo $OUTPUT->render($clearbutton);
+        }
+    }
     echo $OUTPUT->box_end();
 
     // Student view.
 } else {
+
     // Student output displays summary of submissions made so far and provides a button to start editing.
     $mygroup = peerwork_get_mygroup($course->id, $USER->id, $groupingid);
     $membersgradeable = peerwork_get_peers($course->id, $peerwork, $groupingid, $mygroup);
@@ -213,9 +243,9 @@ if (has_capability('mod/peerwork:grade', $context)) {
 
     // Check if I already graded my peers.
     $myassessments = $DB->get_records('peerwork_peers', ['peerwork' => $peerwork->id, 'gradedby' => $USER->id]);
+
     $group = $DB->get_record('groups', ['id' => $mygroup], '*', MUST_EXIST);
     $status = peerwork_get_status($peerwork, $group);
-
     $duedate = peerwork_due_date($peerwork);
     $renderer = $PAGE->get_renderer('mod_peerwork');
 
@@ -245,15 +275,16 @@ if (has_capability('mod/peerwork:grade', $context)) {
                 $grade = $gradinginfo->items[0]->grades[$USER->id];
                 $data['mygrade'] = $grade->str_grade;
             }
-
             $data['feedback'] = $submission->feedbacktext;
             $data['feedback_files'] = peerwork_feedback_files($context, $group);
+
             $pac = new mod_peerwork_criteria($peerwork->id);
             $data['criteria'] = $pac->get_criteria();
 
             if (peerwork_can_students_view_peer_grades($peerwork)) {
                 $data['peergrades'] = peerwork_get_peer_grades_received($peerwork->id, $mygroup, $USER->id);
             }
+
             if (peerwork_can_students_view_peer_justification($peerwork)) {
                 $justificationtype = $peerwork->justificationtype;
                 $data['justificationtype'] = $justificationtype;
@@ -274,6 +305,7 @@ if (has_capability('mod/peerwork:grade', $context)) {
         // Show mod details.
         echo $OUTPUT->heading(format_string($peerwork->name));
         echo $OUTPUT->box(format_string($peerwork->intro));
+
         $summary = new mod_peerwork\output\peerwork_summary($group, $data, $membersgradeable, $peerwork,
             $status->text . ' ' . $editabletext);
         echo $renderer->render($summary);
@@ -315,12 +347,12 @@ if (has_capability('mod/peerwork:grade', $context)) {
         'peerworkid' => $peerwork->id, 'fileupload' => $foptions['maxfiles'] > 0, 'peers' => $membersgradeable,
         'fileoptions' => $foptions, 'peerwork' => $peerwork, 'submission' => $submission, 'files' => $files,
         'myassessments' => $myassessments]);
+
     $mform->set_data($entry);
 
     $redirecturl = new moodle_url('view.php', ['id' => $cm->id]);
     if ($mform->is_cancelled()) {
         redirect($redirecturl);
-
     } else if (($data = $mform->get_data())) {
         peerwork_save($peerwork, $submission, $group, $course, $cm, $context, $data, $draftitemid, $membersgradeable);
         redirect(new moodle_url('view.php', ['id' => $cm->id]));
@@ -334,12 +366,13 @@ if (has_capability('mod/peerwork:grade', $context)) {
     echo $OUTPUT->box(format_string($peerwork->intro));
 
     $mform->display();
+
     $params = [
         'context' => $context,
     ];
-
     $event = submission_viewed::create($params);
     $event->trigger();
 
 } // End of student output
+
 echo $OUTPUT->footer();

@@ -76,18 +76,15 @@ require_once($CFG->libdir . '/grouplib.php');
 function peerwork_get_peers($course, $peerwork, $groupingid, $group = null, $userid = null) {
     global $USER;
     $userid = !$userid ? $USER->id : $userid;
-
     if (!$group) {
         $group = peerwork_get_mygroup($course, $userid, $groupingid);
     }
-
-    $members = groups_get_members($group);
+    // Exclude graders (teachers) who are group members only for separate-groups access.
+    $members = peerwork_get_group_members($peerwork, (int) $group);
     $membersgradeable = $members;
-
     if (!$peerwork->selfgrading) {
         unset($membersgradeable[$userid]);
     }
-
     return $membersgradeable;
 }
 
@@ -605,7 +602,7 @@ function peerwork_get_pa_result($peerwork, $group, $submission = null, $beforeov
     $selfgrade = $peerwork->selfgrading;
 
     $marks = [];
-    $members = groups_get_members($group->id);
+    $members = peerwork_get_group_members($peerwork, (int) $group->id);
 
     foreach ($members as $member) {
         $awarded = peerwork_grades_by_user($peerwork, $member, $members, $beforeoverride);
@@ -777,21 +774,34 @@ function peerwork_get_fileoptions($peerwork) {
 /**
  * Find members of the group that did not submit feedback and graded peers.
  *
+ * Graders (teachers) are excluded, so they never appear as outstanding.
+ *
  * @param stdClass $peerwork The instance.
  * @param stdClass $group The group.
- * @return object[] The outstanding members.
+ * @return stdClass[] The outstanding members, indexed by user ID.
  */
 function peerwork_outstanding($peerwork, $group) {
     global $DB;
 
-    $members = groups_get_members($group->id);
-    foreach ($members as $k => $member) {
-        if ($DB->get_record('peerwork_peers', ['peerwork' => $peerwork->id, 'groupid' => $group->id,
-            'gradedby' => $member->id], 'id', IGNORE_MULTIPLE)) {
-            unset($members[$k]);
-        }
-
+    // Exclude graders (teachers) who are group members only for separate-groups access.
+    $members = peerwork_get_group_members($peerwork, (int) $group->id);
+    if (empty($members)) {
+        return [];
     }
+
+    // Users in this group who have already graded at least one peer.
+    $graderids = $DB->get_fieldset_select(
+        'peerwork_peers',
+        'DISTINCT gradedby',
+        'peerwork = :peerworkid AND groupid = :groupid',
+        ['peerworkid' => $peerwork->id, 'groupid' => $group->id]
+    );
+
+    // Remove anyone who has already graded; the rest are outstanding.
+    foreach ($graderids as $graderid) {
+        unset($members[$graderid]);
+    }
+
     return $members;
 }
 
@@ -1087,8 +1097,15 @@ function peerwork_peer_override($peerworkid, $gradedby, $groupid, $overridden, $
     if ($group->courseid != $cm->course) {
         throw new moodle_exception('invalidcoursemodule', 'error');
     }
-    $members = groups_get_members($groupid);
+    // Load the instance BEFORE the members, because the helper needs it.
     $peerwork = $DB->get_record('peerwork', ['id' => $peerworkid], '*', MUST_EXIST);
+    // Exclude graders (teachers) who are group members only for separate-groups access.
+    $members = peerwork_get_group_members($peerwork, (int) $groupid);
+
+    // SECURITY: Authorise the target group for the current user.
+    if (!peerwork_can_access_group($cm, $peerwork, (int) $groupid)) {
+        throw new moodle_exception('groupaccessdenied', 'mod_peerwork');
+    }
 
     foreach ($criteria as $criterion) {
         // Get existing peer scores.
@@ -1538,7 +1555,7 @@ function mod_peerwork_update_calculation($peerwork) {
             if ($submission->timegraded) {
                 $groupid = $submission->groupid;
                 $group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
-                $members = groups_get_members($groupid);
+                $members = peerwork_get_group_members($peerwork,(int) $groupid);
                 peerwork_update_local_grades($peerwork, $group, $submission, array_keys($members));
             }
         }
@@ -1782,4 +1799,162 @@ function update_plugin_instance(peerwork_plugin $plugin, stdClass $formdata) {
     }
 
     return true;
+}
+
+/**
+ * Check whether a user may access a specific group within a Peer Work activity.
+ *
+ * Rules:
+ *  - The group must exist and belong to the activity's course.
+ *  - If the Peer Work instance uses a grouping, the group must belong to it.
+ *  - In SEPARATEGROUPS mode, the user must be a member of the group
+ *    or have moodle/site:accessallgroups in the module context.
+ *  - In NOGROUPS / VISIBLEGROUPS mode, no group membership restriction applies.
+ *
+ * @param stdClass|cm_info $cm Course module.
+ * @param stdClass $peerwork Peer Work instance record.
+ * @param int $groupid Target group ID.
+ * @param int|null $userid User ID; defaults to current user.
+ * @return bool
+ */
+function peerwork_can_access_group($cm, stdClass $peerwork, int $groupid, ?int $userid = null): bool {
+    global $DB, $USER;
+
+    $userid = $userid ?? (int) $USER->id;
+
+    if ($groupid <= 0) {
+        return false;
+    }
+
+    // 1. The group must exist and belong to this course.
+    $group = groups_get_group($groupid);
+    if (!$group || (int) $group->courseid !== (int) $cm->course) {
+        return false;
+    }
+
+    // 2. The group must belong to the Peer Work grouping, if one is configured.
+    if (!empty($peerwork->pwgroupingid)) {
+        $ingrouping = $DB->record_exists('groupings_groups', [
+            'groupingid' => $peerwork->pwgroupingid,
+            'groupid' => $groupid,
+        ]);
+        if (!$ingrouping) {
+            return false;
+        }
+    }
+
+    // 3. Apply Moodle's separate-groups rule.
+    $groupmode = groups_get_activity_groupmode($cm);
+    if ((int) $groupmode !== SEPARATEGROUPS) {
+        return true;
+    }
+
+    $context = context_module::instance($cm->id);
+    if (has_capability('moodle/site:accessallgroups', $context, $userid)) {
+        return true;
+    }
+
+    return groups_is_member($groupid, $userid);
+}
+
+/**
+ * Require access to a specific group, otherwise throw an exception.
+ *
+ * Call this in every endpoint that receives a groupid BEFORE reading,
+ * exporting, downloading, grading, releasing, or clearing anything.
+ *
+ * @param stdClass|cm_info $cm Course module.
+ * @param stdClass $peerwork Peer Work instance record.
+ * @param int $groupid Target group ID.
+ * @return void
+ * @throws required_capability_exception
+ */
+function peerwork_require_group_access($cm, stdClass $peerwork, int $groupid): void {
+    if (!peerwork_can_access_group($cm, $peerwork, $groupid)) {
+        throw new required_capability_exception(
+            context_module::instance($cm->id),
+            'moodle/site:accessallgroups',
+            'nopermissions',
+            ''
+        );
+    }
+}
+
+/**
+ * Load a submission and require access to the group that owns it.
+ *
+ * Use this when an endpoint receives a submission ID instead of a group ID.
+ * Authorization is based on the group stored in the record, never on a
+ * groupid supplied separately in the request.
+ *
+ * @param stdClass|cm_info $cm Course module.
+ * @param stdClass $peerwork Peer Work instance record.
+ * @param int $submissionid Submission ID from the request.
+ * @return stdClass The submission record.
+ */
+function peerwork_require_submission_access($cm, stdClass $peerwork, int $submissionid): stdClass {
+    global $DB;
+
+    $submission = $DB->get_record('peerwork_submission', [
+        'id' => $submissionid,
+        'peerworkid' => $peerwork->id,
+    ], '*', MUST_EXIST);
+
+    peerwork_require_group_access($cm, $peerwork, (int) $submission->groupid);
+
+    return $submission;
+}
+
+/**
+ * Return only the Peer Work groups the user is allowed to access.
+ *
+ * Use this for listings (view.php) and for "all groups" bulk actions
+ * (groupid = 0 in export, release, clear, and download-all).
+ *
+ * @param stdClass|cm_info $cm Course module.
+ * @param stdClass $peerwork Peer Work instance record.
+ * @param int|null $userid User ID; defaults to current user.
+ * @return stdClass[] Groups indexed by group ID.
+ */
+function peerwork_get_accessible_groups($cm, stdClass $peerwork, ?int $userid = null): array {
+    $allgroups = groups_get_all_groups($cm->course, 0, $peerwork->pwgroupingid);
+
+    return array_filter($allgroups, function($group) use ($cm, $peerwork, $userid) {
+        return peerwork_can_access_group($cm, $peerwork, (int) $group->id, $userid);
+    });
+}
+
+/**
+ * Get the members of a group who take part in the peer assessment.
+ *
+ * Users who can grade the activity (teachers, non-editing teachers) are excluded,
+ * even when they are group members for separate-groups access.
+ *
+ * @param stdClass|int|string $peerwork The Peer Work instance record, or its ID.
+ * @param int|string $groupid The group ID.
+ * @return stdClass[] Members indexed by user ID.
+ */
+function peerwork_get_group_members($peerwork, $groupid): array {
+    global $DB;
+    static $contexts = [];
+
+    // Accept either the instance record or its ID (some callers pass the ID as a string).
+    if (!is_object($peerwork)) {
+        $peerwork = $DB->get_record('peerwork', ['id' => (int) $peerwork], 'id, course', MUST_EXIST);
+    }
+
+    $groupid = (int) $groupid;
+    if ($groupid <= 0) {
+        return [];
+    }
+
+    if (!isset($contexts[$peerwork->id])) {
+        $cm = get_coursemodule_from_instance('peerwork', $peerwork->id, $peerwork->course, false, MUST_EXIST);
+        $contexts[$peerwork->id] = context_module::instance($cm->id);
+    }
+    $context = $contexts[$peerwork->id];
+
+    return array_filter(groups_get_members($groupid), function($member) use ($context) {
+        return !has_capability('mod/peerwork:grade', $context, $member->id);
+    });
 }

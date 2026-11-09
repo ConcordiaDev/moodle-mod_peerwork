@@ -213,18 +213,7 @@
     }
 
     /* allowing the table to take more of the screen */
-    .main-inner {
-        max-width: 1000px !important;
-    }
-
-    .header-maxwidth {
-         max-width: 1000px !important;
-    }
-
-    .secondary-navigation .navigation .nav-tabs {
-        max-width: 1000px !important; 
-    }
-
+    
     .table-striped tbody td{
         padding: 5px;
     }

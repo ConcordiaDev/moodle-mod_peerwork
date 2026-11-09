@@ -17,11 +17,17 @@
 /**
  * Export.
  *
+ * SECURITY: Only groups the current user is authorised to access are exported.
+ *  - groupid > 0: the group is authorised before any data is read.
+ *  - groupid = 0: "all groups" is limited to the user's accessible groups.
+ *
  * @package    mod_peerwork
  * @copyright  2013 LEARNING TECHNOLOGY SERVICES
+ * @author     2026 Francisco Berrizbeitia <francisco.berrizbeitia@concordia.ca>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
+use core\output\notification;
 use core_user\fields;
 use mod_peerwork\event\submissions_exported;
 
@@ -42,19 +48,38 @@ require_capability('mod/peerwork:grade', $cm->context);
 
 $PAGE->set_url(new moodle_url('/mod/peerwork/export.php', ['id' => $id, 'groupid' => $groupid]));
 
+// SECURITY: Fail closed if the group-access helpers are missing from locallib.php.
+if (!function_exists('peerwork_can_access_group') || !function_exists('peerwork_get_accessible_groups')) {
+    throw new coding_exception('mod_peerwork group-access helpers are missing from locallib.php');
+}
+
+$viewurl = new moodle_url('/mod/peerwork/view.php', ['id' => $cm->id]);
+
 if (empty($groupid)) {
-    $groupids = array_keys(groups_get_all_groups($course->id, 0, $peerwork->pwgroupingid));
+    // SECURITY: "All groups" means all groups THIS USER may access, not every group in the grouping.
+    $groupids = array_keys(peerwork_get_accessible_groups($cm, $peerwork));
+
+    if (empty($groupids)) {
+        redirect($viewurl, get_string('nogroups', 'mod_peerwork'), null, notification::NOTIFY_WARNING);
+    }
 } else {
+    // SECURITY: Authorise the single requested group before reading any data.
+    // Covers: non-existent group, group from another course, group outside the
+    // Peer Work grouping, and (in Separate groups mode) groups the user is not
+    // a member of without moodle/site:accessallgroups.
+    // Unknown and forbidden IDs get the same response to prevent enumeration.
+    if (!peerwork_can_access_group($cm, $peerwork, $groupid)) {
+        redirect($viewurl, get_string('groupaccessdenied', 'mod_peerwork'), null, notification::NOTIFY_ERROR);
+    }
     $groupids = [$groupid];
 }
 
-if (empty($groupids)) {
-    throw new moodle_exception('nogroups', 'mod_peerwork');
-}
-
 $context = $cm->context;
+
+// Log the export only once the request has been authorised.
 $params = [
     'context' => $context,
+    'other' => ['groupid' => $groupid],
 ];
 $event = submissions_exported::create($params);
 $event->trigger();
@@ -83,15 +108,13 @@ $headers = [
 
 $filename = clean_filename($peerwork->name . '-' . $id . '_' . ($groupid ? $groupid : 'all'));
 $filename = preg_replace('/[^a-z0-9-]/', '_', core_text::strtolower(strip_tags($filename)));
+
 $csvexport = new csv_export_writer();
 $csvexport->set_filename($filename);
 $csvexport->add_data($headers);
 
-$ingroupparams = [];
-$ingroupsql = ' = 0';
-if (!empty($groupids)) {
-    [$ingroupsql, $ingroupparams] = $DB->get_in_or_equal($groupids, SQL_PARAMS_NAMED);
-}
+// $groupids is guaranteed non-empty and fully authorised at this point.
+[$ingroupsql, $ingroupparams] = $DB->get_in_or_equal($groupids, SQL_PARAMS_NAMED);
 
 $ufieldsapi = fields::for_userpic()->including('email', 'username', 'idnumber');
 $stufields = $ufieldsapi->get_sql('u', false, 'user_', 'user_id', false)->selects;
@@ -100,6 +123,8 @@ $graderfields = $ufieldsapi->get_sql('ug', false, 'grader_', 'grader_id', false)
 $releaserfields = $ufieldsapi->get_sql('ur', false, 'reluser_', 'reluser_id', false)->selects;
 
 $uniqid = $DB->sql_concat_join("'-'", ['g.id', 'COALESCE(s.id, 0)', 'COALESCE(u.id, 0)']);
+
+// SECURITY: Groups are also constrained to this course in SQL (defence in depth).
 $sql = "SELECT $uniqid, $stufields, $graderfields, $releaserfields,
                s.id AS submissionid, s.grade as groupgrade, s.timegraded, s.released, s.timecreated,
                s.feedbacktext, gg.score as studentcontribution, gg.prelimgrade AS studentcalculatedgrade,
@@ -107,6 +132,7 @@ $sql = "SELECT $uniqid, $stufields, $graderfields, $releaserfields,
           FROM {peerwork} p
           JOIN {groups} g
             ON g.id $ingroupsql
+           AND g.courseid = p.course
           JOIN {groups_members} gm
             ON gm.groupid = g.id
      LEFT JOIN {user} u
@@ -123,6 +149,7 @@ $sql = "SELECT $uniqid, $stufields, $graderfields, $releaserfields,
             ON ur.id = s.releasedby
          WHERE p.id = :peerworkid
       ORDER BY g.id, u.id";
+
 $params = ['peerworkid' => $peerwork->id] + $ingroupparams;
 $recordset = $DB->get_recordset_sql($sql, $params);
 
@@ -154,4 +181,5 @@ foreach ($recordset as $record) {
     ]);
 }
 $recordset->close();
+
 $csvexport->download_file();

@@ -17,8 +17,12 @@
 /**
  * Details.
  *
+ * SECURITY: The requested groupid is authorised against the current user
+ * (separate-groups rules) BEFORE any group data is loaded, displayed or saved.
+ *
  * @package    mod_peerwork
  * @copyright  2013 LEARNING TECHNOLOGY SERVICES
+ * @author     2026 Francisco Berrizbeitia <francisco.berrizbeitia@concordia.ca> 
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
@@ -37,24 +41,41 @@ $groupid = required_param('groupid', PARAM_INT);
 $cm = get_coursemodule_from_id('peerwork', $id, 0, false, MUST_EXIST);
 $course = $DB->get_record('course', ['id' => $cm->course], '*', MUST_EXIST);
 $peerwork = $DB->get_record('peerwork', ['id' => $cm->instance], '*', MUST_EXIST);
-$group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
 
-if ($group->courseid != $cm->course) {
-    throw new moodle_exception('invalidcoursemodule', 'error');
-}
-
-$submission = $DB->get_record('peerwork_submission', ['peerworkid' => $peerwork->id, 'groupid' => $groupid]);
-$members = groups_get_members($groupid);
-$status = peerwork_get_status($peerwork, $group);
-
-// Print the standard page header and check access rights.
+// Authenticate and check the activity capability FIRST, before touching group data.
 require_login($course, true, $cm);
 $context = context_module::instance($cm->id);
+require_capability('mod/peerwork:grade', $context);
+
+// SECURITY: Fail closed if the group-access helper is missing from locallib.php.
+if (!function_exists('peerwork_can_access_group')) {
+    throw new coding_exception('mod_peerwork group-access helpers are missing from locallib.php');
+}
+
+// SECURITY: Authorise the requested group for this user in this activity.
+// Covers: non-existent group, group from another course, group outside the
+// Peer Work grouping, and (in Separate groups mode) groups the user is not a
+// member of without moodle/site:accessallgroups.
+// Unknown and forbidden IDs get the same response so group IDs cannot be enumerated.
+if (!peerwork_can_access_group($cm, $peerwork, $groupid)) {
+    redirect(
+        new moodle_url('/mod/peerwork/view.php', ['id' => $cm->id]),
+        get_string('groupaccessdenied', 'mod_peerwork'),
+        null,
+        notification::NOTIFY_ERROR
+    );
+}
+
+// The group is authorised: it is now safe to load its data.
+$group = $DB->get_record('groups', ['id' => $groupid], '*', MUST_EXIST);
+$submission = $DB->get_record('peerwork_submission', ['peerworkid' => $peerwork->id, 'groupid' => $groupid]);
+$members = peerwork_get_group_members($peerwork, (int) $groupid);
+$status = peerwork_get_status($peerwork, $group);
+
 $PAGE->set_url('/mod/peerwork/details.php', ['id' => $cm->id, 'groupid' => $groupid]);
 $PAGE->set_title(format_string($peerwork->name));
 $PAGE->set_heading(format_string($course->fullname));
 $PAGE->set_context($context);
-require_capability('mod/peerwork:grade', $context);
 
 $plugin = 'peerworkcalculator_' . $peerwork->calculator;
 $classname = '\\' . $plugin . '\calculator';
@@ -65,13 +86,10 @@ if ($peerwork->calculator && $calcmissing) {
     echo $OUTPUT->header();
     $error = 'calcmissing';
     $a = '';
-
     if ($submission && peerwork_was_submission_graded_from_status($status)) {
         $a = get_string('calcmissinggraded', 'mod_peerwork');
     }
-
     throw new moodle_exception($error, 'mod_peerwork', '', $a);
-
     echo $OUTPUT->footer();
     return;
 }
@@ -80,6 +98,7 @@ if ($peerwork->calculator && $calcmissing) {
 $fileoptions = mod_peerwork_details_form::$fileoptions;
 $draftitemid = file_get_submitted_draft_itemid('feedback_files');
 file_prepare_draft_area($draftitemid, $context->id, 'mod_peerwork', 'feedback_files', $group->id, $fileoptions);
+
 $data = [
     'paweighting' => $peerwork->paweighting,
     'feedback_files' => $draftitemid,
@@ -106,6 +125,7 @@ $isopen = peerwork_is_open($peerwork, $group->id);
 $canunlock = !empty($isopen->code) && $submission && !$submission->timegraded;
 $duedate = peerwork_due_date($peerwork);
 $duedatenotpassed = $duedate !== PEERWORK_DUEDATE_PASSED;
+
 $mform = new mod_peerwork_details_form($PAGE->url->out(false), [
     'peerwork' => $peerwork,
     'justifications' => $justifications,
@@ -114,6 +134,7 @@ $mform = new mod_peerwork_details_form($PAGE->url->out(false), [
     'canunlock' => $canunlock,
     'duedatenotpassed' => $duedatenotpassed,
 ]);
+
 $data['groupname'] = $group->name;
 $data['status'] = $status->text;
 $submissionfiles = peerwork_submission_files($context, $group);
@@ -125,10 +146,12 @@ $data['submission'] = empty($submissionfiles) ? get_string('nothingsubmitted', '
 $grades = peerwork_get_peer_grades($peerwork, $group, $members, false);
 $pac = new mod_peerwork_criteria($peerwork->id);
 $data['peergradesawarded'] = '';
+
 // Is there per criteria justification enabled?
 $justenabled = $peerwork->justification != MOD_PEERWORK_JUSTIFICATION_DISABLED;
 $justcrit = $peerwork->justificationtype == MOD_PEERWORK_JUSTIFICATION_CRITERIA;
 $justenabledcrit = $justenabled && $justcrit;
+
 $criterion = $pac->get_criteria();
 $summary = new mod_peerwork\output\peerwork_detail_summary(
     $criterion,
@@ -150,11 +173,9 @@ if (peerwork_was_submission_graded_from_status($status)) {
     $result = peerwork_get_pa_result($peerwork, $group);
     $canoverridepeergrades = get_config('peerwork', 'overridepeergrades');
     $localgrades = peerwork_get_local_grades($peerwork->id, $submission->id);
-
     if ($canoverridepeergrades) {
         $overiddenresult = peerwork_get_pa_result($peerwork, $group, null, true);
     }
-
     $gradinginfo = grade_get_grades(
         $course->id,
         'mod',
@@ -162,27 +183,21 @@ if (peerwork_was_submission_graded_from_status($status)) {
         $peerwork->id,
         array_keys($members)
     );
-
     $data['finalgrades'] = [];
-
     foreach ($members as $member) {
         $overriddenweightedgrade = null;
         // Check if the grade has been overridden in the gradebook.
         $grade = $gradinginfo->items[0]->grades[$member->id];
-
         // Format mixed bool/integer parameters.
         $grade->overridden = (empty($grade->overridden)) ? 0 : $grade->overridden;
         $grade->locked = (empty($grade->locked)) ? 0 : $grade->locked;
-
         if ($grade->overridden || $grade->locked) {
             $localgrades[$member->id]->revisedgrade = $grade->grade;
         }
-
         // Check if the grade has been adjusted due to peer grade overrides.
         if ($canoverridepeergrades) {
             $overriddenweightedgrade = $overiddenresult->get_grade($member->id);
         }
-
         $data['finalgrades'][] = [
             'memberid' => $member->id,
             'fullname' => fullname($member),
@@ -208,7 +223,8 @@ if ($mform->is_cancelled()) {
     redirect(new moodle_url('view.php', ['id' => $cm->id]));
 
 } else if (($data = $mform->get_data())) {
-
+    // SECURITY: Saving is reached only after the group authorisation above,
+    // because the form posts back to this same URL with the same groupid.
     // We only save anything when the grade was given.
     if ($data->grade !== null) {
         $grader = new mod_peerwork\group_grader($peerwork, $groupid, $submission);
@@ -216,11 +232,9 @@ if ($mform->is_cancelled()) {
         $grader->set_revised_grades($data->revisedgrades);
         $grader->set_feedback($data->feedback['text'], $data->feedback['format'], $draftitemid);
         $grader->commit();
-
         redirect(new moodle_url('details.php', ['id' => $id, 'groupid' => $groupid]),
             get_string('gradesandfeedbacksaved', 'mod_peerwork'), null, notification::NOTIFY_SUCCESS);
     }
-
     // Redirect to home page because there were no changes.
     redirect(new moodle_url('view.php', ['id' => $cm->id]));
 }

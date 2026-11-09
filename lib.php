@@ -19,6 +19,7 @@
  *
  * @package    mod_peerwork
  * @copyright  2013 LEARNING TECHNOLOGY SERVICES
+ * @author     2026 Francisco Berrizbeitia <francisco.berrizbeitia@concordia.ca>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
@@ -383,6 +384,9 @@ function peerwork_get_file_info($browser, $areas, $course, $cm, $context, $filea
 /**
  * Serves the files from the peerwork file areas
  *
+ * SECURITY: The file item ID is the group ID. Graders may only download files from
+ * groups they are authorised to access; students only from their own group.
+ *
  * @param stdClass $course the course object
  * @param stdClass $cm the course module object
  * @param stdClass $context the peerwork's context
@@ -398,33 +402,40 @@ function peerwork_pluginfile($course, $cm, $context, $filearea, $args, $forcedow
     global $DB, $USER;
 
     if ($context->contextlevel != CONTEXT_MODULE) {
-
         return false;
     }
 
-    require_login();
+    // SECURITY: Check course enrolment and activity visibility, not just site login.
+    require_login($course, true, $cm);
 
     if ($filearea != 'submission' && $filearea != 'feedback_files') {
-
         return false;
     }
 
     $peerwork = $DB->get_record('peerwork', ['id' => $cm->instance], '*', MUST_EXIST);
     $groupingid = $peerwork->pwgroupingid;
-    $itemid = (int)array_shift($args);
-    $mygroup = peerwork_get_mygroup($course->id, $USER->id, $groupingid, false);
 
-    // You need to be a teacher in the course
-    // or belong to the group same as $itemid.
-    if (!has_capability('mod/peerwork:grade', $context)) {
-        if ($itemid != $mygroup) {
+    // The file item ID is the group ID.
+    $itemid = (int) array_shift($args);
+    if ($itemid <= 0) {
+        return false;
+    }
 
+    if (has_capability('mod/peerwork:grade', $context)) {
+        // SECURITY: Graders may only access files of groups they are allowed to access.
+        // Returning false gives a standard "file not found", so group IDs cannot be probed.
+        if (!peerwork_can_access_group($cm, $peerwork, $itemid)) {
+            return false;
+        }
+    } else {
+        // Students may only access files of their own group.
+        $mygroup = peerwork_get_mygroup($course->id, $USER->id, $groupingid, false);
+        if (empty($mygroup) || (int) $mygroup !== $itemid) {
             return false;
         }
     }
 
     $fs = get_file_storage();
-
     $filename = array_pop($args);
     if (empty($args)) {
         $filepath = '/';
@@ -434,7 +445,6 @@ function peerwork_pluginfile($course, $cm, $context, $filearea, $args, $forcedow
 
     $file = $fs->get_file($context->id, 'mod_peerwork', $filearea, $itemid, $filepath, $filename);
     if (!$file) {
-
         return false;
     }
 
@@ -481,10 +491,13 @@ function peerwork_extend_settings_navigation(settings_navigation $settingsnav, ?
 /**
  * Inplace editable callback.
  *
+ * SECURITY: The item ID is the group ID. The grade is only saved if the current
+ * user is authorised to access that group.
+ *
  * @param string $rawitemtype The item type.
  * @param int $itemid The item ID.
  * @param mixed $newvalue The new value.
- * @return void
+ * @return core\output\inplace_editable
  */
 function mod_peerwork_inplace_editable($rawitemtype, $itemid, $newvalue) {
     global $DB, $PAGE;
@@ -501,15 +514,23 @@ function mod_peerwork_inplace_editable($rawitemtype, $itemid, $newvalue) {
 
     switch ($itemtype) {
         case 'groupgrade':
-            $groupid = $itemid;
-            $peerwork = $DB->get_record('peerwork', ['id' => $peerworkid], '*', MUST_EXIST);
+            $groupid = (int) $itemid;
 
-            // We must validate context, permissions, login, etc.
+            // We must validate context, permissions, login, etc. BEFORE touching any data.
             [$course, $cm] = get_course_and_cm_from_instance($peerworkid, 'peerwork');
             $context = context_module::instance($cm->id);
             $PAGE->set_context($context);
             require_login($course, false, $cm);
             require_capability('mod/peerwork:grade', $context);
+
+            $peerwork = $DB->get_record('peerwork', ['id' => $peerworkid], '*', MUST_EXIST);
+
+            // SECURITY: Authorise the target group. Covers non-existent groups, groups from
+            // another course, groups outside the Peer Work grouping, and (in Separate groups
+            // mode) groups the user is not a member of without moodle/site:accessallgroups.
+            if (!peerwork_can_access_group($cm, $peerwork, $groupid)) {
+                throw new moodle_exception('groupaccessdenied', 'mod_peerwork');
+            }
 
             $grader = new mod_peerwork\group_grader($peerwork, $groupid);
             $wasgraded = $grader->was_graded();
@@ -534,6 +555,7 @@ function mod_peerwork_inplace_editable($rawitemtype, $itemid, $newvalue) {
 
     return new core\output\inplace_editable('mod_peerwork', $rawitemtype, $itemid, true, $displayvalue, $value);
 }
+
 
 /**
  * Callback which returns human-readable strings describing the active completion custom rules for the module instance.
